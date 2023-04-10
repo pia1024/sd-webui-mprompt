@@ -1,4 +1,4 @@
-sd-webui-mprompt
+< sd-webui-mprompt > 
 
 用於sd-webui的關鍵字插件
 
