@@ -2,7 +2,7 @@ sd-webui-mprompt
 
 用於sd-webui的關鍵字插件
 
-打開 mprompt 插件後, 接受特定符號操作關鍵字,
+打開 mprompt 插件後, 接受特定符號操作(+,-,$,/)關鍵字, 
 
 prompt為任意關鍵字
 
@@ -21,6 +21,16 @@ prompt-- 等效於 [prompt]
 prompt--- 等效於 [[prompt]]
 
 prompt---- 等效於 [[[prompt]]]
+
+prompt$ 為 {prompt} ~ ((((prompt)))) 隨機強度 (prompt+ ~ prompt+++++)
+
+prompt$2 為 prompt ~ (prompt) 隨機強度 (prompt ~ prompt++)
+
+prompt$23 為 (prompt) ~ ((prompt)) 隨機強度 (prompt++ ~ prompt+++)
+
+prompt$$ 為 prompt隨機使用該關鍵字,(使用與不使用隨機出現)
+
+prompt$$$35 為 隨機使用該關鍵字 ((prompt)) ~ ((((prompt)))) 隨機強度 (prompt+++ ~ prompt+++++)
 
 prompt1/prompt2/prompt3(可選) 等效於 prompt1 AND prompt2 AND prompt3
 
