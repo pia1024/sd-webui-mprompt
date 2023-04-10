@@ -47,6 +47,8 @@ prompt1/prompt2/prompt3(可選) 等效於 prompt1 AND prompt2 AND prompt3
 
 prompt1//prompt2//prompt3(可選)//... 為 prompt1, prompt2, prompt3... 隨機選擇一個 prompt
 
+
+
 tags.key文件 為自定義關鍵詞字典, 格式為: 原文#譯文#類型
 
 紫色#purple#颜色
@@ -55,7 +57,9 @@ tags.key文件 為自定義關鍵詞字典, 格式為: 原文#譯文#類型
 
 -- 關鍵詞輸入 "颜色" (輸入關鍵字為類型時) 會隨機在顏色類別中使用一個顏色
 
-中翻英 T:prompt
+
+
+"T:prompt" 中翻英
 T:你好嗎 等效於 翻譯:你好嗎(英文) 使用有道翻譯接口
 
 
