@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # cython: language_level=3
+# 作者: pia1024
 
 import os
 from random import random, shuffle, choice, choices, sample, randint
@@ -9,7 +10,7 @@ from PIL import Image, PngImagePlugin
 DType,CnDict,EnDict,CnKeys = [],{},{},[]
 taggChinese = True #是否開啟中文關鍵字轉換
 
-print('version: 230313')
+print('tagsGenerator version: 230507')
 
 '''
 23/03/08
@@ -20,8 +21,19 @@ Z: 雙斜槓與單斜槓混合使用處理
 findTag: 關鍵詞搜索現在支持英文搜索
 23/03/13
 translate: 修改返回值為 (譯文,是否為新的詞), 重新寫過整個邏輯
-
-
+23/03/16
+mixPromptFromFiles: 修改關鍵詞分割條件 遇到類似"1girl"時, 不分割
+23/03/19
+mixPromptFromFiles: 修復關鍵詞長度增加的問題, 對重複關鍵字進行合併讓特性更平均
+23/03/22
+mixPromptFromFiles: 添加randomMode選擇, 0為平均模式, 1為隨機模式
+                    修復平均模式小問題
+promptOutput: 添加排除替換關鍵字參數 
+23/04/30
+openPoseImageResize: 調整cnet引導圖的大小以適應圖片比例
+23/05/07
+readPromptFromImage: 更新webUI的參數讀取邏輯, 已解決讀取不完全的問題
+replaceTags: 新增替換關鍵詞函數
 '''
 
 
@@ -278,11 +290,24 @@ def readPromptFromImage(imgPath,debug=None):
     if debug: print(f'{imgPath}')
     if debug>1: print(info)
     
-    def errorLoad():
-        print('< 不支援的格式 > 避免運行中止, 輸出測試用的參數值')
-#         print(info)        
-        prompt = 'A huge red cat with little people and little houses standing next to it, yawning with its mouth wide open. In the background was a town of elves and stars everywhere'
-        negative_prompt = '<Test>'
+    def errorLoad(errorOutput=0):
+        # print(info)
+        
+        if errorOutput==0:
+            prompt = ''
+            negative_prompt = ''
+            print(f'< 不支援的格式 > 避免運行中止, 輸出空白參數值 "{imgPath}"')
+            
+        elif errorOutput==1:
+            prompt = 'cat'
+            negative_prompt = ''
+            print(f'< 不支援的格式 > 避免運行中止, 輸出"cat"作為參數值 "{imgPath}"')
+
+        elif errorOutput==2:
+            prompt = 'A huge red cat with little people and little houses standing next to it, yawning with its mouth wide open. In the background was a town of elves and stars everywhere'
+            negative_prompt = 'test'
+            print(f'< 不支援的格式 > 避免運行中止, 輸出測試用的參數值 "{imgPath}"')
+
         promptDict.update({'prompt':prompt,'negative_prompt':negative_prompt})
         return promptDict
     
@@ -346,21 +371,29 @@ def readPromptFromImage(imgPath,debug=None):
     elif not 'Software' in info and not 'exif' in info and 'parameters' in info:
         if debug: print('< webUI格式圖片 >')
         infoLi = info['parameters'].split('\n') 
+        isNP,isSet = False, False
         for i,x in enumerate(infoLi):
-#             print(f'<{i}> {x}\n')
+            # print(f'<{i}> {x}\n')
             
-            if i==0:
-                promptDict['prompt'] = x
+            if 'Negative prompt' in x:
+                isNP = True
             
-            elif i==1:
-                promptDict['negative_prompt'] = x.replace('Negative prompt:','').strip()
-
-            elif i>=2:
+            if 'Steps' in x:
+                isSet = True
+                
+            if not isNP:
+                promptDict['prompt'] += x.replace('\n','').strip()
+            
+            if isNP and not isSet:
+                promptDict['negative_prompt'] += x.replace('Negative prompt:','').replace('\n','').strip()
+                
+            if isSet:
                 xli = [ p.strip() for p in x.split(',') if p.strip()!='' ]
                 for key in web2PaddleDict:
                     for p in xli:
                         if key in p:
                             promptDict[web2PaddleDict[key]] = p.replace(key,'').strip()
+                            
         if 'size' in promptDict:
                 promptDict['width'], promptDict['height'] = promptDict['size'].split('x')[:2]
                 del promptDict['size']
@@ -458,6 +491,13 @@ def randomLoadPromptFile(dirPath='txt'):
     prompt, np_prompt, promptDict = LoadPromptFile(pfile)
         
     return prompt, np_prompt, promptDict
+
+def randomLoadCNetImagePath(imagePath='cnet_openpose_img'):
+    import os
+    filesLi = getFileLink(imagePath,1,1,filter='png')[0]
+    shuffle(filesLi) #打亂順序
+    cNetImagePath = choice(filesLi)
+    return cNetImagePath
         
 def sequentLoadPromptFile(dirPath='txt'): #順序讀取tag文件
     '''
@@ -496,13 +536,62 @@ def sequentLoadPromptFile(dirPath='txt'): #順序讀取tag文件
         
     return prompt, np_prompt, promptDict
     
-def mixPromptFromFiles(promptDirPath='txt',n=3,debug=0): #讀取並混合參數
+def mixPromptFromFiles(promptDirPath='txt',n=3,randomMode=0,debug=0): #讀取並混合參數
     '''
     讀取並混合描述詞(.txt,.jpg,.png)
     promptDirPath: 來源路徑(描述詞文件夾), 預設為"txt"
     n: 用來混合的描述詞文件數量
+    randomMode: 0:打亂後平均使用關鍵詞(捨棄的關鍵詞少, 風格變異小) 1:打亂後隨機使用關鍵詞(捨棄的關鍵詞變多, 風格變異更大)
     '''
-    from random import choice
+    def splitTags(text):
+        textLi = [x.strip() for x in text.split(',') if x != '']
+        return textLi
+    
+    def splitTagsLen(text):
+        textLi = [x.strip() for x in text.split(',') if x != '']
+        textLen = len(textLi)
+        return textLen
+    
+    #分析關鍵詞結構
+    def analyseTags(promptLi): #分析關鍵詞結構
+        xliType = []
+        mainPrompt = [] #主關鍵詞
+        subPrompt_front = [] #主關鍵詞前面的關鍵詞(比重大)
+        subPrompt_behind = [] #主關鍵詞後的關鍵詞(比重小)
+        q=1 #用來區分當前是在主關鍵詞之前還是之後
+        typeli = [0,1,2] 
+        for i,x in enumerate(splitTags(prompt)):
+            for key in ['girl','woman','man','boy']:
+                if key in x and not '1'+x in x and not '2'+x in x and not '3'+x in x and not '4'+x in x:
+                    xliType+=[typeli[0]]
+                    if typeli[0]==0: mainPrompt += [x]
+                    if typeli[0]==2: subPrompt_behind += [x]
+                    typeli[0] = 2
+                    q=2
+                    break
+                else:
+                    xliType+=[typeli[q]]
+                    if q==1: subPrompt_front += [x]
+                    if q==2: subPrompt_behind += [x]
+                    break
+                    
+        if not 0 in xliType:
+            xliType = [ 2 if x==1 else x for x in xliType]
+            subPrompt_behind = subPrompt_front.copy()
+            subPrompt_front = []
+            
+        #去重並計算與主關鍵詞的差集
+        subPrompt_front = list(set(subPrompt_front).difference(set(mainPrompt)))
+        subPrompt_behind = list(set(subPrompt_behind).difference(set(mainPrompt)))
+                    
+        if debug>1: print('關鍵詞總數:',len(xliType))
+        if debug>1: print('關鍵詞類型:',xliType)
+        if debug>1: print('主關鍵詞:',len(mainPrompt),mainPrompt)
+        if debug>1: print('子關鍵詞(前):',len(subPrompt_front),subPrompt_front)
+        if debug>1: print('子關鍵詞(後):',len(subPrompt_behind),subPrompt_behind)
+        return xliType,mainPrompt,subPrompt_front,subPrompt_behind
+    
+    from random import choice, shuffle
     n=n #組合數量, 設置用多少組關鍵詞組合
     filesLi = []
     tempDict = {Paddle2PaddleDict[x]:[] for x in Paddle2PaddleDict}
@@ -518,6 +607,7 @@ def mixPromptFromFiles(promptDirPath='txt',n=3,debug=0): #讀取並混合參數
 
     for x in range(n):
         info = LoadPromptFile(filesLi[x])[2] #讀取文件返回參數字典
+        if debug>1: print(f'圖片關鍵詞數量: < {splitTagsLen(info["prompt"])} > ,{filesLi[x]}')
         for key in Paddle2PaddleDict: #參數字典key Paddle2PaddleDict[key]
             if Paddle2PaddleDict[key] in info: #合併所有圖的'prompt'跟'negative_prompt'參數
                 if Paddle2PaddleDict[key] in ['prompt','negative_prompt']:
@@ -530,49 +620,75 @@ def mixPromptFromFiles(promptDirPath='txt',n=3,debug=0): #讀取並混合參數
 
     #隨機選擇一張圖的逆關鍵字
     tempDict['negative_prompt'] = choice(tempDict['negative_prompt'])
-    if debug>1: tempDict['negative_prompt']
+    if debug>0: tempDict['negative_prompt']
 
     #處理正關鍵詞
-    xli = []
-    for x in tempDict['prompt']:
-        xli += [[p.strip() for p in x.split(',') if p != '']] #分割第一組關鍵詞
+    prompt = choice(tempDict['prompt']) #正關鍵詞
+    promptLen = splitTagsLen(prompt) #正關鍵詞數量
+    if debug>0: print(f'主關鍵詞數量: < {promptLen} >, {prompt}\n')
 
-    xli
-    xliType = []
-    mainPrompt = [] #主關鍵詞
-    subPrompt_front = [] #主關鍵詞前面的關鍵詞(比重大)
-    subPrompt_behind = [] #主關鍵詞後的關鍵詞(比重小)
-    q=1 #用來區分當前是在主關鍵詞之前還是之後
-    for i,x in enumerate(xli):
-        for p in x: #關鍵詞分類
-            for key in ['girl','woman','man','boy']:
-                if key in p:
-                    if not i: xliType+=[0]
-                    mainPrompt += [p]
-                    q = 2
-                    break
-                else: 
-                    if not i: xliType+=[q]
-                    if q==1: subPrompt_front += [p]
-                    if q==2: subPrompt_behind += [p]
-                    break
+    xliType,mainPrompt,subPrompt_front,subPrompt_behind = analyseTags(splitTags(prompt))
+    main_xliType = xliType.copy()
+    if debug>0: print(f'主關鍵詞類型: {main_xliType}\n')
 
-    if not 0 in xliType:
-        xliType = [ 2 if x==1 else x for x in xliType]
-        subPrompt_behind += subPrompt_front
-
-
-    if debug: print(f'關鍵詞分類表: {xliType}') #關鍵詞分類表
-    if debug>1: print(f'主關鍵詞: {mainPrompt}') #主關鍵詞
-    if debug>1: print(f'子關鍵詞A: {subPrompt_front}') #主關鍵詞前面的關鍵詞(比重大)
-    if debug>1: print(f'子關鍵詞B: {subPrompt_behind}') #主關鍵詞後的關鍵詞(比重小)
+    
+    mainPrompt_, subPrompt_front_, subPrompt_behind_ = [],[],[] 
+    for prompt in tempDict['prompt']:
+        xliType,mainPrompt,subPrompt_front,subPrompt_behind = analyseTags(splitTags(prompt))
+        mainPrompt_+=mainPrompt
+        subPrompt_front_+=subPrompt_front
+        subPrompt_behind_+=subPrompt_behind
+        
+    mainPrompt, subPrompt_front, subPrompt_behind = mainPrompt_.copy(), subPrompt_front_.copy(), subPrompt_behind_.copy()
+    del mainPrompt_, subPrompt_front_, subPrompt_behind_
+        
+    if debug>0: print('mainPrompt:',len(mainPrompt),mainPrompt,'\n')
+    if debug>0: print('subPrompt_front:',len(subPrompt_front),subPrompt_front,'\n')
+    if debug>0: print('subPrompt_behind:',len(subPrompt_behind),subPrompt_behind,'\n')
+        
+    #複製一份
+    mainPrompt_ = mainPrompt.copy()
+    subPrompt_front_ = subPrompt_front.copy()
+    subPrompt_behind_ = subPrompt_behind.copy()
 
     prompt = []
-    for x in xliType:
-        if x==0: prompt += [choice(mainPrompt)]
-        if x==1: prompt += [choice(subPrompt_front)]
-        if x==2: prompt += [choice(subPrompt_behind)]
-
+    for x in main_xliType:
+        if x==0:
+            shuffle(mainPrompt_) #打亂次序
+            if randomMode==0:
+                try:
+                    prompt += [mainPrompt_.pop()]
+                except:
+                    mainPrompt_ = mainPrompt.copy()
+                    shuffle(mainPrompt_)
+                    prompt += [mainPrompt_.pop()]
+            elif randomMode==1:
+                prompt += [choice(mainPrompt_)]
+                
+        if x==1: 
+            shuffle(subPrompt_front_) #打亂次序
+            if randomMode==0:
+                try:
+                    prompt += [subPrompt_front_.pop()]
+                except:
+                    subPrompt_front_ = subPrompt_front.copy()
+                    shuffle(subPrompt_front_)
+                    prompt += [subPrompt_front_.pop()]
+            elif randomMode==1:
+                prompt += [choice(subPrompt_front_)]
+                    
+        if x==2:
+            shuffle(subPrompt_behind_) #打亂次序
+            if randomMode==0:        
+                try:
+                    prompt += [subPrompt_behind_.pop()]
+                except:
+                    subPrompt_behind_ = subPrompt_behind.copy()
+                    shuffle(subPrompt_behind_)
+                    prompt += [subPrompt_behind_.pop()]
+            elif randomMode==1:
+                prompt += [choice(subPrompt_behind_)]
+                
     tempDict['prompt'] = ', '.join(prompt)
     promptDict = {x:tempDict[x] for x in tempDict if tempDict[x]!=[]} #清理空白參數
     return promptDict
@@ -678,6 +794,10 @@ if os.path.exists('tags.key'):
     #讀取關鍵字字典
     TagsDict=loadTagsFile('tags.key')
     updateTagsDict()
+elif os.path.exists('extensions/sd-webui-mprompt/tags.key'):
+    #讀取關鍵字字典
+    TagsDict=loadTagsFile('extensions/sd-webui-mprompt/tags.key')
+    updateTagsDict()
 else:
     print('未找到關鍵字字典 tags.key')
     TagsDict=loadTagsText("空白#None#NoType")
@@ -696,15 +816,12 @@ def findTag(tagText,tagType=None,exclude=None,debug=0):
     for tag in tagText.split(','): #搜索中文
         for key in TagsDict:
             key_,type_ = key.split('#')
-            if tagType: 
-                keyCopy = tag in key_ and type_==tagType 
-            else: 
-                keyCopy = tag in key_
+            if tagType: keyCopy = tag in key_ and type_==tagType 
+            else: keyCopy = tag in key_
             if keyCopy:
                 tagLi.append([key,TagsDict[key]])
                 if not exclude:
-                    if debug: print('中文 [添加]',key,TagsDict[key])
-                        
+                    if debug: print('[添加]',key,TagsDict[key])
                         
     for tag in tagText.split(','): #搜索英文
         for key in TagsDict:
@@ -717,19 +834,8 @@ def findTag(tagText,tagType=None,exclude=None,debug=0):
                 if keyCopy:
                     tagLi.append([key,TagsDict[key]])
                     if not exclude:
-                        if debug: print('英文 [添加]',key,TagsDict[key])
-
-    if tagType is None:
-        for tag in tagText.split(','): #搜索類型
-            if tag[0]=='#':
-                tag = tag[1:]
-                for key in TagsDict:
-                    key_,type_ = key.split('#')
-                    if tag==type_:
-                        tagLi.append([key,TagsDict[key]])
-                        if not exclude:
-                            if debug: print('類型 [添加]',key,TagsDict[key])
-                            
+                        if debug: print('[添加]',key,TagsDict[key])
+            
     if exclude:
         tagLi, tagLi_ = [], tagLi
         for key,value in tagLi_:
@@ -741,7 +847,6 @@ def findTag(tagText,tagType=None,exclude=None,debug=0):
             if keyCopy:
                 if debug: print('[添加]',key,TagsDict[key])
                 tagLi.append([key,value]) #複製
-                
     return(tagLi)
     
 def getTag(tag,debug=None):
@@ -1073,14 +1178,17 @@ def Z(Tag_split, debug=0): #處理"/"與"//"參數 單斜槓轉換為 "參數 AN
             
     return text, outPrompt
     
-def promptOutput(input, debug=None):
+def promptOutput(input, replaceList=None, debug=None):
 #     debug=1
     '''
+    replaceList: 傳入字典(替換跟排除)或列表(排除)格式, 替換關鍵詞或排除關鍵詞
     '''
+    
     promptText = ''
     promptOutput = ''
     tagsLi=[]
     tags = input
+    if replaceList==None: replaceList={}
     for oneTag in tags.split(','): #輸入關鍵詞分割為單個關鍵詞
         tagsLi += [oneTag.strip()]
     if debug: print('##Tags:',tagsLi,'\n')
@@ -1089,8 +1197,16 @@ def promptOutput(input, debug=None):
     for tag in tagsLi: #單個關鍵詞分割為列表
         temp=[]
         for ss in tag.split(' '):
-            temp += [ss]
-        ssLi+=[temp]
+            if not ss in replaceList:
+                temp += [ss]
+            else:
+                if type(replaceList) is dict:
+                    temp += [replaceList[ss]]
+                    if debug: print(f'替換關鍵詞: "{ss}" 為 "{replaceList[ss]}"')
+                elif type(replaceList) is list:
+                    if debug: print(f'排除關鍵詞: "{ss}"')
+        if temp!=[]: 
+            ssLi+=[temp]
     if debug: print('##Tag_split:',ssLi,'\n')
     
     ssLi_Text=[]
@@ -1511,6 +1627,83 @@ def translateBack(word): #有道翻譯API
     print(text_)
 
 
+def openPoseImageResize(openPoseImagePath,resize=(512,512),mode=None,ratio=1.0):
+    '''
+    resize: 輸出引導圖的尺寸, 建議與文生圖大小一致
+    mode: 原始引導圖放置於輸出引導圖的甚麼位置, 輸入接受1-9 ,分別是左上1, 中上2, 右上3, 左中4, 中5, 右中6, 左下7, 中下8, 右下9, 預設為8
+    ratio: 原始引導圖的縮放比例, 越小引導圖生成的人物越小
+    '''
+    from myfn2.readImage import readImage
+    from myfn2.genBaseImage import genBaseImage
+    from myfn2.imgResize import imgResize
+    import os
+    openPoseImage = readImage(openPoseImagePath) #原始openPose參照圖
+#     imshow(openPoseImage)
+    img = genBaseImage(resize,RGB=[0,0,0]) #底圖
+#     imshow(img)
+
+    openPoseMax = max(openPoseImage.size) #疊加圖的最大邊
+    imgMin = min(img.size) #底圖的最小邊
+    
+    #疊加圖需要縮放到底圖最小邊
+    r = float(imgMin)/float(openPoseMax)*float(ratio)
+    openPoseImageXsize, openPoseImageYsize = openPoseImage.size
+    openPoseImageXsize, openPoseImageYsize = int(openPoseImageXsize*r), int(openPoseImageYsize*r)
+    new_openPoseImage = imgResize(openPoseImage,(openPoseImageXsize, openPoseImageYsize))
+#     imshow(new_openPoseImage)
+    
+    #計算放置點
+    
+    XMoveMax = img.size[0] - new_openPoseImage.size[0] #X軸最大可移動範圍
+    YMoveMax = img.size[1] - new_openPoseImage.size[1] #Y軸最大可移動範圍
+#     print(new_openPoseImage.size,img.size)
+#     print(XMoveMax,YMoveMax)
+    LU=(0,0) #左上
+    LM=(0,YMoveMax//2) #左中
+    LD=(0,YMoveMax)#左下
+    MU=(XMoveMax//2,0)#中上
+    MM=(XMoveMax//2,YMoveMax//2)#置中
+    MD=(XMoveMax//2,YMoveMax)#中下 (預設)
+    RU=(XMoveMax,0) #右上
+    RM=(XMoveMax,YMoveMax//2) #右中
+    RD=(XMoveMax,YMoveMax) #右下
+    if mode==1: MV=LU
+    elif mode==2: MV=MU
+    elif mode==3: MV=RU
+    elif mode==4: MV=LM
+    elif mode==5: MV=MM
+    elif mode==6: MV=RM
+    elif mode==7: MV=LD
+    elif mode==8: MV=MD
+    elif mode==9: MV=RD
+    else: MV=MD
+    
+    #合併兩張圖
+    img_copy = img.copy()
+    img_copy.paste(new_openPoseImage,MV)
+    # imshow(img_copy)
+#     return img_copy
+    img_copy.save(os.path.abspath('temp.png'))
+    return os.path.abspath('temp.png')
+    
+def replaceTags(text:str,replaceDict, debug=1): #替換關鍵詞
+    '''
+    替換關鍵詞
+    text: 要替換的字串
+    replaceDict: 替換關鍵詞使用的字典或字串('A|A1, B|B1')
+    '''
+    def str2Dict(text): #替換關鍵詞 (字串轉字典)
+        list_ = [x.strip() for x in text.split(',')]
+        dict_ = {x.split('|')[0].strip():x.split('|')[1].strip() for x in list_}
+        return dict_
+    
+    if type(replaceDict) is not dict: replaceDict = str2Dict(replaceDict) 
+        
+    for key in replaceDict:
+        if key in text:
+            if debug: print(f'替換關鍵詞 "{key}" > "{replaceDict[key]}"')
+            text = text.replace(key,replaceDict[key])
+    return text
 
 if __name__ == "__main__": #不是被調用狀況下, 將執行此命令用於顯示此函數的使用方式
 	pass
